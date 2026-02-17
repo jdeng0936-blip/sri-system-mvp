@@ -1,0 +1,671 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>销售AI情报系统 - 员工培训</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            overflow: hidden;
+        }
+
+        .slides-container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+        }
+
+        .slide {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            padding: 60px;
+            background: white;
+        }
+
+        .slide.active {
+            display: flex;
+        }
+
+        .slide-content {
+            max-width: 900px;
+            width: 100%;
+        }
+
+        .slide.title-slide {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            text-align: center;
+        }
+
+        .slide.title-slide h1 {
+            font-size: 64px;
+            margin-bottom: 20px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+
+        .slide.title-slide p {
+            font-size: 32px;
+            opacity: 0.9;
+        }
+
+        h1 {
+            font-size: 48px;
+            margin-bottom: 40px;
+            color: #1a202c;
+        }
+
+        h2 {
+            font-size: 36px;
+            margin-bottom: 30px;
+            color: #2d3748;
+        }
+
+        h3 {
+            font-size: 28px;
+            margin: 20px 0;
+            color: #4a5568;
+        }
+
+        ul {
+            list-style: none;
+            padding: 0;
+        }
+
+        li {
+            font-size: 24px;
+            line-height: 1.8;
+            margin: 15px 0;
+            padding-left: 30px;
+            position: relative;
+        }
+
+        li:before {
+            content: "→";
+            position: absolute;
+            left: 0;
+            color: #667eea;
+            font-weight: bold;
+        }
+
+        .highlight {
+            background: #fef3c7;
+            padding: 20px;
+            border-radius: 10px;
+            margin: 20px 0;
+        }
+
+        .stats {
+            display: flex;
+            justify-content: space-around;
+            margin: 40px 0;
+        }
+
+        .stat-item {
+            text-align: center;
+        }
+
+        .stat-number {
+            font-size: 48px;
+            font-weight: bold;
+            color: #667eea;
+        }
+
+        .stat-label {
+            font-size: 20px;
+            color: #4a5568;
+            margin-top: 10px;
+        }
+
+        .comparison {
+            display: flex;
+            justify-content: space-around;
+            margin: 40px 0;
+        }
+
+        .comparison-item {
+            flex: 1;
+            padding: 30px;
+            border-radius: 10px;
+            text-align: center;
+            margin: 0 10px;
+        }
+
+        .comparison-item.before {
+            background: #fee2e2;
+        }
+
+        .comparison-item.after {
+            background: #d1fae5;
+        }
+
+        .controls {
+            position: fixed;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 20px;
+            z-index: 1000;
+        }
+
+        .control-btn {
+            background: white;
+            border: none;
+            padding: 15px 30px;
+            font-size: 18px;
+            border-radius: 25px;
+            cursor: pointer;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            transition: all 0.3s;
+        }
+
+        .control-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 12px rgba(0,0,0,0.15);
+        }
+
+        .slide-number {
+            position: fixed;
+            bottom: 30px;
+            right: 30px;
+            background: rgba(0,0,0,0.5);
+            color: white;
+            padding: 10px 20px;
+            border-radius: 20px;
+            font-size: 16px;
+        }
+
+        .emoji {
+            font-size: 1.2em;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+        }
+
+        th, td {
+            padding: 15px;
+            text-align: left;
+            border-bottom: 2px solid #e2e8f0;
+        }
+
+        th {
+            background: #667eea;
+            color: white;
+            font-size: 20px;
+        }
+
+        td {
+            font-size: 18px;
+        }
+
+        .feature-list {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 20px;
+            margin: 30px 0;
+        }
+
+        .feature-item {
+            background: #f7fafc;
+            padding: 20px;
+            border-radius: 10px;
+            border-left: 4px solid #667eea;
+        }
+    </style>
+</head>
+<body>
+    <div class="slides-container">
+        <!-- Slide 1: 封面 -->
+        <div class="slide title-slide active">
+            <div class="slide-content">
+                <h1><span class="emoji">🎯</span> 销售AI情报系统</h1>
+                <p>让AI成为你的销售超级助手</p>
+                <p style="margin-top: 40px; font-size: 24px;">员工培训 V2.0</p>
+                <p style="margin-top: 20px; font-size: 18px; opacity: 0.8;">培训时长：1小时 | 适用对象：销售团队</p>
+            </div>
+        </div>
+
+        <!-- Slide 2: 痛点 -->
+        <div class="slide">
+            <div class="slide-content">
+                <h1><span class="emoji">😰</span> 销售工作的5大痛点</h1>
+                <ul>
+                    <li>❌ 客户问技术问题，答不上来</li>
+                    <li>❌ 翻找资料浪费时间</li>
+                    <li>❌ 不知道引用哪个案例最合适</li>
+                    <li>❌ 记不住所有产品参数</li>
+                    <li>❌ 遇到复杂问题无人支援</li>
+                </ul>
+                <div class="comparison">
+                    <div class="comparison-item before">
+                        <h3>传统方式</h3>
+                        <p style="font-size: 20px;">准备：30分钟<br>回答：5分钟</p>
+                    </div>
+                    <div class="comparison-item after">
+                        <h3>AI系统 ✨</h3>
+                        <p style="font-size: 20px;">准备：5分钟<br>回答：30秒</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Slide 3: 系统概览 -->
+        <div class="slide">
+            <div class="slide-content">
+                <h1><span class="emoji">🌟</span> SRI动态销售情报系统</h1>
+                <div class="feature-list">
+                    <div class="feature-item">
+                        <h3><span class="emoji">📚</span> 技术武器库</h3>
+                        <p>存储所有技术资料</p>
+                    </div>
+                    <div class="feature-item">
+                        <h3><span class="emoji">🎙️</span> 第一现场</h3>
+                        <p>AI实时问答</p>
+                    </div>
+                    <div class="feature-item">
+                        <h3><span class="emoji">🥽</span> 战术护目镜</h3>
+                        <p>实时销售建议</p>
+                    </div>
+                    <div class="feature-item">
+                        <h3><span class="emoji">🆘</span> 炮火支援</h3>
+                        <p>专家快速连线</p>
+                    </div>
+                </div>
+                <div class="stats">
+                    <div class="stat-item">
+                        <div class="stat-number">85%</div>
+                        <div class="stat-label">效率提升</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-number">95%</div>
+                        <div class="stat-label">准确率</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-number">+18%</div>
+                        <div class="stat-label">满意度</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Slide 4: 快速上手 -->
+        <div class="slide">
+            <div class="slide-content">
+                <h1><span class="emoji">🚀</span> 3步开始使用</h1>
+                <div class="highlight">
+                    <h3>第1步：登录系统</h3>
+                    <ul>
+                        <li>打开浏览器</li>
+                        <li>输入API Key</li>
+                        <li>选择角色</li>
+                    </ul>
+                </div>
+                <div class="highlight">
+                    <h3>第2步：上传资料</h3>
+                    <ul>
+                        <li>进入技术武器库</li>
+                        <li>上传产品手册</li>
+                        <li>一键向量化</li>
+                    </ul>
+                </div>
+                <div class="highlight">
+                    <h3>第3步：开始拜访</h3>
+                    <ul>
+                        <li>进入第一现场</li>
+                        <li>绑定项目</li>
+                        <li>输入客户问题</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <!-- Slide 5: 技术武器库 -->
+        <div class="slide">
+            <div class="slide-content">
+                <h1><span class="emoji">📚</span> 技术武器库</h1>
+                <h3>用途：存储所有技术文档</h3>
+                <div style="display: flex; gap: 40px; margin-top: 40px;">
+                    <div style="flex: 1;">
+                        <h3>支持格式</h3>
+                        <ul>
+                            <li>📄 PDF、TXT</li>
+                            <li>🎙️ MP3、WAV（自动转录）</li>
+                            <li>🎬 MP4（自动转录）</li>
+                        </ul>
+                    </div>
+                    <div style="flex: 1;">
+                        <h3>文档分类</h3>
+                        <ul>
+                            <li>产品参数/白皮书</li>
+                            <li>历史竞标书</li>
+                            <li>成功案例</li>
+                            <li>技术视频</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Slide 6: 第一现场 -->
+        <div class="slide">
+            <div class="slide-content">
+                <h1><span class="emoji">🎙️</span> 第一现场</h1>
+                <div class="comparison">
+                    <div class="comparison-item before" style="background: #dbeafe;">
+                        <h3>左侧（客户可见）</h3>
+                        <ul style="text-align: left;">
+                            <li>产品展示</li>
+                            <li>AI回答问题</li>
+                            <li>专业、可信</li>
+                            <li>有引用来源</li>
+                        </ul>
+                    </div>
+                    <div class="comparison-item after" style="background: #fee2e2;">
+                        <h3>右侧（销售专用）</h3>
+                        <ul style="text-align: left;">
+                            <li>战术护目镜</li>
+                            <li>实时分析</li>
+                            <li>话术建议</li>
+                            <li>底牌筹码</li>
+                        </ul>
+                    </div>
+                </div>
+                <div class="highlight" style="margin-top: 40px;">
+                    <h3>使用流程</h3>
+                    <p style="font-size: 22px; line-height: 1.8;">
+                        1️⃣ 绑定项目 → 2️⃣ 客户提问 → 3️⃣ AI自动回答 → 4️⃣ 查看战术建议
+                    </p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Slide 7: 战术护目镜 -->
+        <div class="slide">
+            <div class="slide-content">
+                <h1><span class="emoji">🥽</span> 战术护目镜（销售密器）</h1>
+                <h3>功能：实时AI战术分析（仅销售可见）</h3>
+                <div style="margin-top: 40px;">
+                    <div class="highlight">
+                        <h3><span class="emoji">🎯</span> 话术拆解</h3>
+                        <p style="font-size: 20px;">客户真正担心的是什么？背后的动机是什么？</p>
+                    </div>
+                    <div class="highlight">
+                        <h3><span class="emoji">💡</span> 出牌建议</h3>
+                        <p style="font-size: 20px;">应该引用哪个案例？可以承诺什么筹码？如何化解顾虑？</p>
+                    </div>
+                </div>
+                <div class="highlight" style="background: #f0f9ff; margin-top: 30px;">
+                    <p style="font-size: 22px;"><strong>案例：</strong>客户说"你们价格太贵了"</p>
+                    <p style="font-size: 18px; margin-top: 10px;">→ 战术分析：担心性价比和投资回报</p>
+                    <p style="font-size: 18px;">→ 建议：强调长期收益、引用成功案例、提供优惠方案</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Slide 8: 炮火支援 -->
+        <div class="slide">
+            <div class="slide-content">
+                <h1><span class="emoji">🆘</span> 炮火支援</h1>
+                <h3>用途：联系后方技术专家</h3>
+                <div style="margin-top: 40px;">
+                    <h3>什么时候使用？</h3>
+                    <ul>
+                        <li>AI无法准确回答技术问题</li>
+                        <li>客户提出非标定制需求</li>
+                        <li>需要特批权限或优惠</li>
+                        <li>遇到紧急技术难题</li>
+                    </ul>
+                </div>
+                <div class="highlight" style="margin-top: 40px;">
+                    <h3>工作流程</h3>
+                    <p style="font-size: 22px; text-align: center; line-height: 2;">
+                        点击按钮 → 自动打包上下文 →<br>
+                        推送专家群 → 等待响应（1-5分钟）
+                    </p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Slide 9: 案例1 -->
+        <div class="slide">
+            <div class="slide-content">
+                <h1><span class="emoji">💼</span> 案例1：新手销售的成功</h1>
+                <div class="highlight" style="background: #f0fdf4;">
+                    <h3>背景</h3>
+                    <ul>
+                        <li>张三，入职3个月</li>
+                        <li>第一次拜访大客户</li>
+                    </ul>
+                    <h3 style="margin-top: 20px;">使用系统</h3>
+                    <ul>
+                        <li>上传了产品手册</li>
+                        <li>客户提出<strong>8个</strong>技术问题</li>
+                        <li>AI回答<strong>6个</strong>，呼叫支援<strong>2个</strong></li>
+                        <li>全部在<strong>30分钟</strong>内解决</li>
+                    </ul>
+                    <h3 style="margin-top: 20px;">结果</h3>
+                    <p style="font-size: 24px; line-height: 2;">
+                        ✅ 客户印象深刻<br>
+                        ✅ 项目进入下一轮<br>
+                        ✅ 张三信心大增
+                    </p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Slide 10: 案例2 -->
+        <div class="slide">
+            <div class="slide-content">
+                <h1><span class="emoji">💼</span> 案例2：老销售效率翻倍</h1>
+                <table>
+                    <tr>
+                        <th>指标</th>
+                        <th>使用前</th>
+                        <th>使用后</th>
+                        <th>提升</th>
+                    </tr>
+                    <tr>
+                        <td><strong>准备时间</strong></td>
+                        <td>30分钟</td>
+                        <td><strong>5分钟</strong></td>
+                        <td>83% ⬆️</td>
+                    </tr>
+                    <tr>
+                        <td><strong>回答速度</strong></td>
+                        <td>5分钟</td>
+                        <td><strong>30秒</strong></td>
+                        <td>90% ⬆️</td>
+                    </tr>
+                    <tr>
+                        <td><strong>客户满意度</strong></td>
+                        <td>75%</td>
+                        <td><strong>95%</strong></td>
+                        <td>20% ⬆️</td>
+                    </tr>
+                </table>
+                <div class="highlight" style="margin-top: 30px;">
+                    <h3>使用技巧</h3>
+                    <ul>
+                        <li>武器库统一管理资料</li>
+                        <li>AI快速回答常规问题</li>
+                        <li>战术护目镜优化话术</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <!-- Slide 11: 最佳实践 -->
+        <div class="slide">
+            <div class="slide-content">
+                <h1><span class="emoji">🏆</span> 6个使用技巧</h1>
+                <ul>
+                    <li><strong>📚 提前准备</strong> - 拜访前上传相关资料</li>
+                    <li><strong>🎯 主动展示</strong> - 向客户展示AI系统</li>
+                    <li><strong>👁️ 善用护目镜</strong> - 客户说话时瞥一眼</li>
+                    <li><strong>🆘 及时求助</strong> - 不要硬扛不会的问题</li>
+                    <li><strong>📝 及时反馈</strong> - 记录不准确的回答</li>
+                    <li><strong>🔄 持续优化</strong> - 定期更新武器库</li>
+                </ul>
+            </div>
+        </div>
+
+        <!-- Slide 12: 注意事项 -->
+        <div class="slide">
+            <div class="slide-content">
+                <h1><span class="emoji">⚠️</span> 使用禁忌</h1>
+                <ul>
+                    <li><strong>❌ 让客户看到战术护目镜</strong><br>
+                        <span style="font-size: 20px; color: #666;">→ 这是销售专用功能，保护商业秘密</span></li>
+                    <li><strong>❌ 100%依赖AI</strong><br>
+                        <span style="font-size: 20px; color: #666;">→ AI是助手，不是替代</span></li>
+                    <li><strong>❌ 忽视系统建议</strong><br>
+                        <span style="font-size: 20px; color: #666;">→ 战术护目镜是AI智能分析</span></li>
+                    <li><strong>❌ 不上传新资料</strong><br>
+                        <span style="font-size: 20px; color: #666;">→ 武器库需要持续更新</span></li>
+                </ul>
+            </div>
+        </div>
+
+        <!-- Slide 13: 常见问题 -->
+        <div class="slide">
+            <div class="slide-content">
+                <h1><span class="emoji">❓</span> 常见问题</h1>
+                <div class="highlight">
+                    <h3>Q1: AI回答不准确怎么办？</h3>
+                    <p style="font-size: 20px;">→ 呼叫技术支援，反馈改进</p>
+                </div>
+                <div class="highlight">
+                    <h3>Q2: 客户会发现我在用AI吗？</h3>
+                    <p style="font-size: 20px;">→ 不会，战术护目镜仅你可见</p>
+                </div>
+                <div class="highlight">
+                    <h3>Q3: 可以在手机上用吗？</h3>
+                    <p style="font-size: 20px;">→ 可以，但建议电脑/平板</p>
+                </div>
+                <div class="highlight">
+                    <h3>Q4: 需要培训多久？</h3>
+                    <p style="font-size: 20px;">→ 1小时培训 + 1周熟悉即可</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Slide 14: 学习路径 -->
+        <div class="slide">
+            <div class="slide-content">
+                <h1><span class="emoji">📅</span> 学习路径</h1>
+                <div class="feature-list">
+                    <div class="feature-item">
+                        <h3>第1周：熟悉界面</h3>
+                        <ul>
+                            <li>每天登录10分钟</li>
+                            <li>上传1-2份文档</li>
+                        </ul>
+                    </div>
+                    <div class="feature-item">
+                        <h3>第2周：模拟练习</h3>
+                        <ul>
+                            <li>模拟客户问答5次</li>
+                            <li>记录问题反馈</li>
+                        </ul>
+                    </div>
+                    <div class="feature-item">
+                        <h3>第3周：实战使用</h3>
+                        <ul>
+                            <li>真实拜访时使用</li>
+                            <li>参加经验分享会</li>
+                        </ul>
+                    </div>
+                    <div class="feature-item">
+                        <h3>第4周：高级功能</h3>
+                        <ul>
+                            <li>学习数据分析</li>
+                            <li>参加进阶培训</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Slide 15: 结束 -->
+        <div class="slide title-slide">
+            <div class="slide-content">
+                <h1><span class="emoji">🚀</span> 开始你的AI销售之旅！</h1>
+                <div style="margin-top: 60px; font-size: 28px; line-height: 2;">
+                    <p>💪 <strong>AI是助手，你是主导</strong></p>
+                    <p>🎯 <strong>实践出真知</strong></p>
+                    <p>🌟 <strong>持续优化</strong></p>
+                </div>
+                <div style="margin-top: 60px; font-size: 20px;">
+                    <p>技术支持：400-XXX-XXXX</p>
+                    <p>培训咨询：training@company.com</p>
+                </div>
+                <p style="margin-top: 60px; font-size: 32px;">谢谢大家！Q&A时间 🙋</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="controls">
+        <button class="control-btn" onclick="previousSlide()">← 上一页</button>
+        <button class="control-btn" onclick="nextSlide()">下一页 →</button>
+    </div>
+
+    <div class="slide-number">
+        <span id="current-slide">1</span> / <span id="total-slides">15</span>
+    </div>
+
+    <script>
+        let currentSlide = 0;
+        const slides = document.querySelectorAll('.slide');
+        const totalSlides = slides.length;
+        
+        document.getElementById('total-slides').textContent = totalSlides;
+        
+        function showSlide(n) {
+            slides[currentSlide].classList.remove('active');
+            currentSlide = (n + totalSlides) % totalSlides;
+            slides[currentSlide].classList.add('active');
+            document.getElementById('current-slide').textContent = currentSlide + 1;
+        }
+        
+        function nextSlide() {
+            showSlide(currentSlide + 1);
+        }
+        
+        function previousSlide() {
+            showSlide(currentSlide - 1);
+        }
+        
+        // 键盘导航
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'PageDown') {
+                e.preventDefault();
+                nextSlide();
+            } else if (e.key === 'ArrowLeft' || e.key === 'PageUp') {
+                e.preventDefault();
+                previousSlide();
+            } else if (e.key === 'Home') {
+                e.preventDefault();
+                showSlide(0);
+            } else if (e.key === 'End') {
+                e.preventDefault();
+                showSlide(totalSlides - 1);
+            }
+        });
+    </script>
+</body>
+</html>

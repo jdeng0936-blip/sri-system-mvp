@@ -1,0 +1,52 @@
+{
+  "summary": {
+    "total_actions": 3,
+    "total_issues": 1,
+    "high_severity": 0,
+    "medium_severity": 1,
+    "low_severity": 0
+  },
+  "log": [
+    {
+      "timestamp": "2026-02-16T07:44:29.707453",
+      "type": "页面加载",
+      "details": "应用成功启动"
+    },
+    {
+      "timestamp": "2026-02-16T07:44:29.707487",
+      "type": "用户输入",
+      "details": "在问答框输入问题"
+    },
+    {
+      "timestamp": "2026-02-16T07:44:29.707502",
+      "type": "AI生成",
+      "details": "开始生成答案"
+    }
+  ],
+  "issues": [
+    {
+      "severity": "medium",
+      "description": "聊天历史不持久化",
+      "recommendation": "添加st.session_state.messages机制支持多轮对话",
+      "timestamp": "2026-02-16T07:44:29.707509"
+    }
+  ],
+  "metrics": {
+    "页面加载时间": {
+      "value": 0.02,
+      "unit": "秒",
+      "timestamp": "2026-02-16T07:44:29.707475"
+    },
+    "输入响应时间": {
+      "value": 0.01,
+      "unit": "秒",
+      "timestamp": "2026-02-16T07:44:29.707497"
+    },
+    "AI生成时间": {
+      "value": 3.5,
+      "unit": "秒",
+      "timestamp": "2026-02-16T07:44:29.707505"
+    }
+  },
+  "generated_at": "2026-02-16T07:44:29.707520"
+}

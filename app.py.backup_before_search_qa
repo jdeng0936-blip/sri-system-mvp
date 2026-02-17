@@ -1,0 +1,1000 @@
+import json
+import re
+import io
+import base64
+import difflib
+import datetime
+import PyPDF2
+
+import openai
+import streamlit as st
+import streamlit.components.v1 as components
+from database import (init_db, insert_visit_log, get_all_logs, add_project, get_projects,
+                      get_logs_by_project, save_intelligence, get_all_projects, get_project_data,
+                      get_user_blind_spots, save_test_record, get_all_test_records)
+from llm_service import (parse_visit_log, parse_visit_log_with_image, encode_image,
+                         chat_with_project, chat_with_project_stream,
+                         generate_quiz, critique_answer, generate_team_report,
+                         generate_followup_email, generate_tech_summary,
+                         generate_insider_ammo, transcribe_audio)
+from modules import render_sandbox_tab, render_learning_tab, render_leader_tab
+
+# ── 全局默认配置 (Data Dictionary) ──
+DEFAULT_CONFIGS = {
+    "project_stages": [
+        "初期接触", "方案报价", "商务谈判",
+        "技术僵持", "逼单/签约", "丢单归档",
+    ],
+    "pain_point_options": [
+        "工期极其紧张", "整体预算受限", "后期维护成本高",
+        "安装空间受限", "运行环境恶劣(高腐蚀/高粉尘)",
+        "需要智能化升级",
+    ],
+    "role_options": [
+        "决策者 (关注ROI/风险)",
+        "使用者 (关注易用/免维护)",
+        "影响者 (关注参数/合规)",
+        "教练/内线 (关注控标/汇报)",
+    ],
+    "leader_attitudes": [
+        "极度看重初期投入成本 (对价格极其敏感)",
+        "绝对迷信大品牌/求稳怕担责 (只信西门子/ABB等大厂)",
+        "极度看重工期和投产节点 (对时间/交期极度焦虑)",
+        "看重全生命周期与长期绝对安全 (价值与质量导向)",
+    ],
+    "leader_histories": [
+        "首次接触我们，防备心较重",
+        "历史合作过，对我们有一定信任基础",
+        "过去曾被友商(或低价设备)坑过，心有余悸",
+        "对各家方案均不满意，处于摇摆观望状态",
+    ],
+    "info_sources": [
+        "高层客情/内线透露 (可信度极高)",
+        "设计院/合作伙伴引入 (带有一定倾向性)",
+        "公开招标/采购网 (公开竞争/内定风险高)",
+        "陌拜/展会挖掘 (处于极早期)",
+        "友商渠道流出 (需防范假消息)",
+    ],
+    "project_drivers": [
+        "老旧设备改造/消除隐患 (关注痛点)",
+        "产能扩建/新建厂房 (关注工期)",
+        "响应政策/环保合规 (关注指标)",
+        "数字化/智能化升级 (关注新技术)",
+    ],
+    "position_options": [
+        "领跑 (参与标准制定/已锁定关键人)",
+        "并跑 (常规技术交流中，有竞争)",
+        "跟跑/陪跑 (介入较晚/竞品明显占优)",
+        "未知 (刚获取信息，局势不明)",
+    ],
+    "budget_statuses": [
+        "预算已全额批复 (随时可采)",
+        "部分资金到位/边建边批 (有扯皮风险)",
+        "正在申报预算 (可引导预算金额)",
+        "资金来源不明/自筹 (警惕烂尾)",
+    ],
+}
+
+
+# 柔性评价体系默认维度（各项独立 0-100 评估权重）
+DEFAULT_EVAL_DIMENSIONS = {
+    "M — 量化指标 (Metrics)": 80,
+    "E — 经济决策者 (Economic Buyer)": 100,
+    "D — 决策标准 (Decision Criteria)": 70,
+    "D — 决策流程 (Decision Process)": 70,
+    "I — 核心痛点 (Identify Pain)": 90,
+    "C — 内部教练 (Champion)": 90,
+    "R — 利益关系捆绑 (Relationship)": 85,
+}
+
+
+def _init_dynamic_options():
+    """统一初始化所有动态下拉选项到 session_state（仅首次加载时执行）。"""
+    for key, defaults in DEFAULT_CONFIGS.items():
+        if key not in st.session_state:
+            st.session_state[key] = list(defaults)  # 深拷贝，避免修改全局默认
+    # 初始化柔性评价维度
+    if "eval_dimensions" not in st.session_state:
+        st.session_state.eval_dimensions = dict(DEFAULT_EVAL_DIMENSIONS)
+    # 初始化立项审核缓冲池（list of dicts）
+    if not isinstance(st.session_state.get("pending_projects"), list):
+        st.session_state.pending_projects = []  # [{client, project_name, dept, applicant, time, ...}]
+    # 初始化全局实体库 (Entity First CRM 架构)
+    if "entities" not in st.session_state:
+        st.session_state.entities = {
+            "业主方": ["万华化学", "中石化", "中石油", "巴斯夫", "宁德时代", "比亚迪"],
+            "设计院": ["中国石化工程建设公司 (SEI)", "华陆工程科技", "中国天辰工程 (TCC)", "中国寰球工程公司 (HQCEC)", "华东建筑设计研究院"],
+            "总包方": ["中建三局", "中建八局"]
+        }
+    # 初始化注册表单步骤
+    if "reg_form_step" not in st.session_state:
+        st.session_state.reg_form_step = 1
+    if "form_key" not in st.session_state:
+        st.session_state.form_key = 0
+    if "project_name_cache" not in st.session_state:
+        st.session_state.project_name_cache = []
+        try:
+            # 初次加载时，从数据库拉取全量数据并进行"万能清洗"
+            db_data = get_all_projects()
+            if db_data:
+                for p in db_data:
+                    # 万能解包：无论老板的 DB 返回的是字典、元组还是对象
+                    if isinstance(p, dict):
+                        name = p.get('project_name') or p.get('name') or p.get('id') or str(p)
+                    elif isinstance(p, (list, tuple)) and len(p) > 1:
+                        name = str(p[1])  # project_name 在第二列 (第一列是 project_id)
+                    elif isinstance(p, (list, tuple)) and len(p) == 1:
+                        name = str(p[0])
+                    else:
+                        name = str(p)
+                    st.session_state.project_name_cache.append(name)
+        except Exception as e:
+            print(f"数据库预热异常: {e}")
+    # 初始化正式项目实体库 (富字典结构，供沙盘权限过滤)
+    if "projects" not in st.session_state:
+        st.session_state.projects = {}
+        try:
+            db_data = get_all_projects()
+            if db_data:
+                for p in db_data:
+                    name = str(p[1]) if isinstance(p, (list, tuple)) and len(p) > 1 else str(p)
+                    parts = name.split(" - ")
+                    st.session_state.projects[name] = {
+                        "db_id": p[0] if isinstance(p, (list, tuple)) else None,
+                        "client": parts[0] if len(parts) >= 1 else "未知业主",
+                        "design_institute": parts[2] if len(parts) >= 3 else "",
+                        "general_contractor": "",
+                        "applicant": "历史数据",
+                        "dept": "未知战区",
+                    }
+        except Exception as e:
+            print(f"项目实体库预热异常: {e}")
+
+
+# ── 本地隐私脱敏 ──
+
+def mask_sensitive_info(text: str) -> str:
+    """对文本进行本地隐私脱敏：手机号 & 金额。"""
+    # 规则 1：11 位连续数字（手机号）
+    text = re.sub(r"\b1[3-9]\d{9}\b", "[PHONE_MASK]", text)
+    # 规则 2：数字+万/元（金额）
+    text = re.sub(r"\d+(\.\d+)?\s*[万元]", "[MONEY_MASK]", text)
+    return text
+
+
+# 初始化数据库
+init_db()
+_init_dynamic_options()
+
+# 页面配置
+st.set_page_config(page_title="SRI 作战指挥室", layout="wide")
+
+# --- 隐藏 Streamlit 默认的开发者菜单和页脚，打造沉浸式体验 ---
+hide_streamlit_style = """
+<style>
+/* 隐藏右上角的 Deploy 按钮 */
+.stDeployButton {
+    visibility: hidden;
+}
+/* 隐藏右上角的三道杠菜单 */
+#MainMenu {
+    visibility: hidden;
+}
+/* 隐藏底部的 "Made with Streamlit" */
+footer {
+    visibility: hidden;
+}
+</style>
+"""
+st.markdown(hide_streamlit_style, unsafe_allow_html=True)
+
+
+# ── 语音文本输入组件（强制简体中文） ──
+def _voice_stt_block(label, key):
+    """内部复用：渲染录音面板 + Whisper STT，转写结果写入 session_state[key]"""
+    short_label = label.split("：")[0].split("(")[0].strip()
+    with st.expander(f"🎙️ 点击开启语音输入：{short_label}", expanded=False):
+        audio_value = st.audio_input("说话结束请再次点击以转文字", key=f"audio_{key}")
+
+    if audio_value and audio_value != st.session_state.get(f"last_audio_{key}"):
+        _api_key = st.session_state.get("api_key_value", "")
+        if not _api_key:
+            st.warning("请先在左侧侧边栏输入 API Key 以启用语音识别！")
+        else:
+            with st.spinner("🧠 正在将您的口述转为简体文字..."):
+                try:
+                    audio_bytes = audio_value.read()
+                    audio_file = io.BytesIO(audio_bytes)
+                    audio_file.name = "audio.wav"
+
+                    from openai import OpenAI as _OpenAI
+                    _client = _OpenAI(api_key=_api_key)
+                    transcript_text = _client.audio.transcriptions.create(
+                        model="whisper-1",
+                        file=audio_file,
+                        language="zh",
+                        prompt="以下是一段简体中文的业务记录，请务必使用简体中文输出：",
+                        response_format="text",
+                    )
+
+                    current_text = st.session_state.get(key, "")
+                    if current_text:
+                        st.session_state[key] = current_text + "\n" + transcript_text
+                    else:
+                        st.session_state[key] = transcript_text
+
+                    st.session_state[f"last_audio_{key}"] = audio_value
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"语音识别失败，请检查配置：{e}")
+
+
+def voice_text_area(label, key, placeholder="", height=150):
+    """带语音录入的 text_area（强制简体中文）"""
+    _voice_stt_block(label, key)
+    return st.text_area(label, key=key, placeholder=placeholder, height=height)
+
+
+def voice_text_input(label, key, placeholder=""):
+    """带语音录入的 text_input（强制简体中文）"""
+    _voice_stt_block(label, key)
+    return st.text_input(label, key=key, placeholder=placeholder)
+
+# ── 侧边栏 ──
+with st.sidebar:
+    # --- 置顶的重置按钮 ---
+    if st.button("🔄 刷新/重置系统状态", use_container_width=True):
+        st.rerun()
+    st.markdown("---")
+
+    st.header("⚙️ 系统设置")
+    api_key = st.text_input("请输入大模型 API Key", type="password")
+    st.session_state["api_key_value"] = api_key  # 供 voice_enabled_text_widget 读取
+
+    # 清空输入框的辅助函数
+    def _clear_project_inputs():
+        for k in ["input_client_manual", "input_project", "input_design_manual",
+                   "sb_client_select", "sb_design_select"]:
+            if k in st.session_state:
+                del st.session_state[k]
+
+    import time
+    def auto_focus_next(keyword):
+        """强行注入焦点，加时间戳防止组件缓存"""
+        uid = time.time()
+        js_code = f"""
+        <script id="focus-{uid}">
+        setTimeout(function() {{
+            var doc = window.parent.document;
+            var inputs = doc.querySelectorAll('input[type="text"]');
+            for (var i = 0; i < inputs.length; i++) {{
+                var label = inputs[i].getAttribute('aria-label') || '';
+                var placeholder = inputs[i].getAttribute('placeholder') || '';
+                if (label.includes('{keyword}') || placeholder.includes('{keyword}')) {{
+                    inputs[i].focus();
+                    break;
+                }}
+            }}
+        }}, 400); 
+        </script>
+        """
+        components.html(js_code, height=0, width=0)
+
+    with st.expander("➕ 新建作战项目 / 注册申报", expanded=True):
+        fk = st.session_state.form_key 
+        
+        # --- 彻底改用内存缓存层提取联想词库 ---
+        existing_full_names = st.session_state.project_name_cache
+        
+        existing_clients = sorted(list(set([name.split(" - ")[0] for name in existing_full_names if " - " in name])))
+        
+        # 提取设计院数据 (基于内存全名或历史记录)
+        # 注意：如果全名中没有设计院信息，这里可能依然为空，后续建议在注册时将设计院单独存入一个缓存列表
+        existing_designs = sorted(list(set([name.split(" - ")[2] for name in existing_full_names if name.count(" - ") >= 2])))
+
+        st.markdown("##### 📝 第一步：锁定终端客户")
+        client_options = ["➕ 手动录入新客户"] + existing_clients
+        selected_client_option = st.selectbox(
+            "🏢 客户/企业名称 (点此直接键盘搜索)：", 
+            client_options, 
+            index=0, 
+            key=f"sb_client_select_{fk}"
+        )
+        
+        if selected_client_option == "➕ 手动录入新客户":
+            client_name = st.text_input("✍️ 请输入新客户全称 (按 Enter 回车跳转⬇️)：", placeholder="例：万华化学", key=f"input_client_manual_{fk}")
+        else:
+            client_name = selected_client_option
+            st.success(f"✅ 已锁定客户：{client_name}")
+
+        st.markdown("---")
+        
+        # 焦点引擎触发：跳第二步
+        if client_name and st.session_state.reg_form_step == 1:
+            st.session_state.reg_form_step = 2
+            auto_focus_next("二期技改") # 用 placeholder 精准制导
+            
+        if not client_name:
+            st.info("👆 请先在上方确立终端客户。")
+        else:
+            st.markdown("##### 🎯 第二步：确立作战项目")
+
+            # --- 修复核心：正确提取当前客户名下的项目列表 ---
+            project_options = ["➕ 新建作战项目"]
+
+            # 从缓存中筛选属于当前客户的项目 (格式: "客户 - 项目名")
+            for full_name in existing_full_names:
+                if " - " in full_name:
+                    parts = full_name.split(" - ", 1)
+                    if parts[0] == client_name:
+                        project_options.append(parts[1])  # 只取项目名部分
+
+            selected_project = st.selectbox(
+                "🏗️ 具体项目名称 (点此直接键盘搜索)：",
+                options=project_options,
+                index=0,
+                key=f"sb_project_select_{fk}"
+            )
+
+            if selected_project == "➕ 新建作战项目":
+                project_name = st.text_input(
+                    "📝 手动输入新项目名称：",
+                    placeholder="例：二期 MDI 技改项目",
+                    key=f"input_project_{fk}"
+                )
+                is_new_project = True
+            else:
+                project_name = selected_project
+                is_new_project = False
+                st.info(f"📂 已调用历史项目档案：{project_name}")
+
+            st.markdown("---")
+
+            if not project_name:
+                st.info("👆 请在上方选择或新建一个作战项目。")
+            else:
+                st.markdown("##### 🤝 第三步：关联生态伙伴 (可选)")
+
+                # 1. 预设行业头部设计院/总包名单 (符合大型工业项目顶层设计)
+                preset_designs = [
+                    "中国石化工程建设公司 (SEI)",
+                    "华陆工程科技 (原化工部第六设计院)",
+                    "中国寰球工程公司 (HQCEC)",
+                    "中国天辰工程 (TCC)",
+                    "赛鼎工程 (原化工部第二设计院)",
+                    "中建三局",
+                    "中建八局",
+                    "华东建筑设计研究院"
+                ]
+
+                # 2. 从历史缓存中动态抓取已有的设计院
+                history_designs = []
+                for full_name in existing_full_names:
+                    if full_name.count(" - ") >= 2:
+                        di = full_name.split(" - ")[2]
+                        if di and di not in ["🚫 暂无/不需要", ""]:
+                            history_designs.append(di)
+
+                # 3. 列表去重合并
+                smart_design_db = sorted(list(set(preset_designs + history_designs)))
+                design_options = ["【找不到？点此输入新设计院】", "🚫 暂无/不需要"] + smart_design_db
+
+                # 4. 渲染搜索下拉框 (设为 None 默认悬空，提升搜索体验)
+                selected_design_option = st.selectbox(
+                    "📐 设计院/总包 (点此直接键盘搜索)：",
+                    options=design_options,
+                    index=None,
+                    placeholder="🔍 请选择或搜索行业院所 (选填)",
+                    key=f"sb_design_select_{fk}"
+                )
+
+                # 5. 分流逻辑：兼容 None 的情况
+                if selected_design_option == "【找不到？点此输入新设计院】":
+                    design_institute = st.text_input("✍️ 请输入设计院/总包全称：", placeholder="例：浙江省天正设计工程有限公司", key=f"input_design_manual_{fk}")
+                elif selected_design_option == "🚫 暂无/不需要" or selected_design_option is None:
+                    design_institute = ""
+                else:
+                    design_institute = selected_design_option
+                    st.success(f"✅ 已关联生态：{design_institute}")
+
+        full_project_id = f"{client_name} - {project_name}" if client_name and project_name else ""
+        
+        if client_name and project_name:
+            st.markdown("---")
+
+            # --- 根据项目状态智能分流 ---
+            if is_new_project:
+                # 只有新建项目才允许提交审批
+                if st.button("🚀 提交立项审核", type="primary", use_container_width=True):
+
+                    # 1. 雷达红区：正式库精准撞单拦截 (拦截同名项目)
+                    is_formal_collision = full_project_id in existing_full_names
+
+                    # 2. 雷达黄区：审核池精准撞单拦截
+                    is_pending_collision = any(
+                        p.get("project_name") == full_project_id
+                        for p in st.session_state.get("pending_projects", [])
+                    )
+
+                    if is_formal_collision:
+                        st.error(f"🚨 绝对拦截：项目【{full_project_id}】已存在正式库中，请直接在右侧沙盘调用！")
+                    elif is_pending_collision:
+                        st.error(f"⏳ 撞单拦截：项目【{full_project_id}】已在审核池中排队，请勿重复提交！")
+                    else:
+                        # 3. 通过雷达，安全进入审核池
+                        import datetime as _dt_submit
+                        timestamp = _dt_submit.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+                        if not isinstance(st.session_state.get("pending_projects"), list):
+                            st.session_state.pending_projects = []
+
+                        design_val = locals().get('design_institute', '')
+                        st.session_state.pending_projects.append({
+                            "client": client_name,
+                            "project_name": full_project_id,
+                            "design_institute": design_val,
+                            "applicant": st.session_state.get("current_user", "未知"),
+                            "dept": st.session_state.get("user_dept", "未知战区"),
+                            "time": timestamp,
+                        })
+                        st.success(f"✅ 提报成功！项目【{full_project_id}】已推送至总监审核池。")
+
+                        # --- 核心：核弹级自毁重建 ---
+                        st.session_state.form_key += 1
+                        st.session_state.reg_form_step = 1
+                        st.rerun()
+            else:
+                # 如果调用的是老项目，给出引导提示，隐藏审批按钮
+                st.info("💡 该项目已是正式在建项目。请直接在右侧【🗺️ 作战沙盘】中调取并录入现场情报。")
+
+# --- 审核工作台 (侧边栏快捷入口) ---
+if st.session_state.pending_projects:
+    st.sidebar.markdown("---")
+    st.sidebar.error(f"🔔 待办：有 {len(st.session_state.pending_projects)} 个项目待审核")
+    with st.sidebar.expander("👮‍♂️ 注册审核工作台", expanded=True):
+        for idx, p in enumerate(list(st.session_state.pending_projects)):
+            pid = p.get("project_name", f"未知项目_{idx}")
+            st.write(f"**{pid}**")
+            st.caption(f"提报人: {p.get('applicant', '未知')} | 战区: {p.get('dept', '未知')}")
+            c1, c2 = st.columns(2)
+            if c1.button("通过", key=f"ok_{idx}_{pid}"):
+                # 1. 从内存缓冲池移除
+                st.session_state.pending_projects.remove(p)
+                # 2. 写入数据库
+                add_project(pid, "线索")
+                if pid not in st.session_state.project_name_cache:
+                    st.session_state.project_name_cache.append(pid)
+                # 3. 同步写入正式项目实体库 (保留审批元数据)
+                st.session_state.projects[pid] = {
+                    "db_id": None,
+                    "client": p.get("client", "未知业主"),
+                    "design_institute": p.get("design_institute", ""),
+                    "general_contractor": "",
+                    "applicant": p.get("applicant", "未知"),
+                    "dept": p.get("dept", "未知战区"),
+                }
+                # 4. 视觉反馈
+                st.session_state.current_project = pid
+                st.toast("✅ 审核通过！已写入数据库。")
+                st.rerun()
+            if c2.button("驳回", key=f"no_{idx}_{pid}"):
+                st.session_state.pending_projects.remove(p)
+                st.toast("❌ 已驳回申请")
+                st.rerun()
+            st.divider()
+
+# --- 1. 真实三层组织架构 (带高管编制) ---
+ORG_CHART = {
+    "华东战区": ["张三", "李四", "王五"],
+    "华北战区": ["孙七", "周八"],
+    "华南战区": ["阿宝", "阿强"],
+    "大客户部": ["Linda", "Tony"]
+}
+
+# 战区总监映射表
+DIRECTORS = {
+    "华东战区": "王总监",
+    "华北战区": "赵总监",
+    "华南战区": "陈总监",
+    "大客户部": "林总监"
+}
+
+# --- 2. 角色身份与权限级联 ---
+st.sidebar.markdown("---")
+st.sidebar.caption("👤 当前作战身份")
+
+role_type = st.sidebar.selectbox(
+    "请选择职能角色:",
+    ["一线销售 (提报立项)", "区域总监 (片区审批)", "销售VP (全局统筹)", "系统管理员"],
+    index=0,
+    key="role_select"
+)
+
+# 提取核心角色名 (如 "一线销售")
+base_role = role_type.split(" ")[0]
+st.session_state.role = base_role
+
+if base_role == "一线销售":
+    selected_dept = st.sidebar.selectbox("🏢 所属战区:", options=list(ORG_CHART.keys()))
+    selected_name = st.sidebar.selectbox("👋 销售姓名:", options=ORG_CHART[selected_dept])
+
+    st.session_state.current_user = selected_name
+    st.session_state.user_dept = selected_dept
+    st.sidebar.success(f"已登录: {selected_name} ({selected_dept})")
+
+elif base_role == "区域总监":
+    selected_dept = st.sidebar.selectbox("🏢 分管战区:", options=list(DIRECTORS.keys()))
+    director_name = DIRECTORS[selected_dept]
+
+    st.session_state.current_user = director_name
+    st.session_state.user_dept = selected_dept
+    st.sidebar.success(f"已登录: {director_name} ({selected_dept}负责人)")
+
+elif base_role in ["销售VP", "系统管理员"]:
+    # 上帝视角，没有部门限制
+    st.session_state.current_user = "高管/管理员"
+    st.session_state.user_dept = "ALL"
+    st.sidebar.success(f"已登录: {st.session_state.current_user} (拥有全局上帝视角)")
+
+# 保持下游兼容：将 session_state 同步到局部变量 current_user
+current_user = st.session_state.current_user
+
+# ── 主界面 ──
+st.title("🎯 SRI 动态销售情报系统")
+
+tab_intel, tab_sandbox, tab_academy, tab_knowledge, tab_live_pitch, tab_leader = st.tabs(
+    ["📝 情报录入", "🗺️ 作战沙盘", "🎓 AI 伴学中心", "📚 核心技术武器库", "🎙️ 第一现场", "📊 领导看板"]
+)
+
+# ── 情报录入 ──
+with tab_intel:
+    # 1. 获取项目列表并选择
+    project_names = get_all_projects()
+    if not project_names:
+        st.warning("⚠️ 暂无项目，请先在左侧侧边栏新建项目！")
+        selected_project = None
+        selected_project_id = None
+    else:
+        project_map = {p[1]: p[0] for p in project_names}
+        selected_project = st.selectbox("📂 选择关联项目：", list(project_map.keys()), key="tab1_project_select")
+        selected_project_id = project_map[selected_project]
+
+    # 2. 战役立项基座
+    if selected_project_id:
+        st.markdown("### 🏛️ 战役立项基座 (硬性背景指标)")
+        with st.expander("📝 首次建档 / 更新项目背景指标 (战略原点)", expanded=True):
+            col_base1, col_base2 = st.columns(2)
+            with col_base1:
+                # 信息来源 - 决定情报的可信度
+                info_source = st.selectbox(
+                    "🕵️\u200d♂️ 核心信息获取来源：",
+                    st.session_state.info_sources,
+                    key="base_info_source",
+                )
+                # 驱动力 - 决定客户痛点方向
+                project_driver = st.selectbox(
+                    "🚀 立项核心驱动力：",
+                    st.session_state.project_drivers,
+                    key="base_project_driver",
+                )
+            with col_base2:
+                # 身位 - 决定进攻策略 (领跑vs跟跑)
+                current_position = st.selectbox(
+                    "🏁 我方当前有利状态 (身位)：",
+                    st.session_state.position_options,
+                    key="base_position",
+                )
+                # 预算 - 决定商务策略
+                budget_status = st.selectbox(
+                    "💰 资金/预算落实情况：",
+                    st.session_state.budget_statuses,
+                    key="base_budget",
+                )
+
+            if st.button("💾 锁定并注入立项背景档案", type="primary", use_container_width=True, key="btn_save_baseline"):
+                # 1. 构造高权重情报文本
+                baseline_intel = (
+                    f"【🚨 系统标记：核心立项背景基座】\n"
+                    f"- 信息来源：{info_source}\n"
+                    f"- 核心驱动力：{project_driver}\n"
+                    f"- 我方当前身位：{current_position}\n"
+                    f"- 预算状态：{budget_status}\n"
+                    f"（AI参谋请注意：此为项目底层硬性约束，"
+                    f"后续所有策略分析必须基于此背景！）"
+                )
+
+                # 2. 追加到 session_state 供当前会话中 AI 即时使用
+                if "project_data" not in st.session_state:
+                    st.session_state.project_data = ""
+                st.session_state.project_data += f"\n{baseline_intel}"
+
+                # 3. 持久化到数据库
+                try:
+                    save_intelligence(selected_project_id, "[立项背景基座更新]", baseline_intel)
+                    position_tag = current_position.split(" ")[0]
+                    st.success(f"✅ 战役基座已锁定！AI 已感知我方当前处于【{position_tag}】状态。")
+                except Exception as e:
+                    st.error(f"保存失败，请检查数据库连接。错误信息：{e}")
+
+        st.markdown("---")
+
+    # 3. 添加日常推进动态
+    st.markdown("### ✍️ 添加日常推进动态")
+
+    daily_log = voice_text_area(
+        label="✍️ 销售口述流水账或会议纪要：",
+        key="input_daily_log",
+        placeholder="例：今天见了张总，他觉得价格偏高...",
+        height=150
+    )
+    raw_text = daily_log  # 保持下游变量兼容
+
+    st.markdown("---")
+    st.markdown("### 📸 👂 现场情报多模态捕获 (支持图文/PDF文档)")
+    st.info("💡 实战玩法：上传竞品铭牌照片，或【PDF格式】的招标文件/技术图纸，AI 将自动提炼核心参数！")
+
+    # 初始化已处理文件指纹库（防重复消耗 Token）
+    if "processed_file_hashes" not in st.session_state:
+        st.session_state.processed_file_hashes = set()
+    # 初始化当前解析的草稿情报（缓冲区）
+    if "staged_intel" not in st.session_state:
+        st.session_state.staged_intel = ""
+
+    uploaded_file = st.file_uploader("上传现场照片或技术文档提取情报 (支持 JPG/PNG/PDF)：", type=["jpg", "jpeg", "png", "pdf"])
+
+    if uploaded_file is not None:
+        file_hash = hash(uploaded_file.getvalue())
+
+        # 拦截机制：检查是否已经解析过该文件
+        if file_hash in st.session_state.processed_file_hashes:
+            st.warning("⚠️ 系统检测到该文件此前已解析并入库，为防止情报冗余，已拦截本次重复解析操作。")
+        else:
+            # 只有当处于未解析状态，且暂存区为空时，才触发大模型解析
+            if st.session_state.get("last_parsed_file") != file_hash:
+                with st.spinner("👁️🗨️ 战术 AI 正在深度解析文件，请稍候..."):
+                    try:
+                        parsed_intel = ""
+                        file_extension = uploaded_file.name.split('.')[-1].lower()
+
+                        from openai import OpenAI as _OpenAI
+                        _client = _OpenAI(api_key=api_key)
+
+                        # --- 调用解析引擎 ---
+                        if file_extension == 'pdf':
+                            pdf_reader = PyPDF2.PdfReader(uploaded_file)
+                            extracted_text = "".join([pdf_reader.pages[i].extract_text() + "\n" for i in range(min(5, len(pdf_reader.pages)))])
+
+                            pdf_prompt = f"请提炼以下客户文档的核心商业情报、坑(排他条款)及破局建议：\n{extracted_text[:6000]}"
+                            response = _client.chat.completions.create(
+                                model="gpt-4o-mini",
+                                messages=[{"role": "user", "content": pdf_prompt}]
+                            )
+                            parsed_intel = response.choices[0].message.content
+
+                        elif file_extension in ['jpg', 'jpeg', 'png']:
+                            base64_image = base64.b64encode(uploaded_file.getvalue()).decode('utf-8')
+                            response = _client.chat.completions.create(
+                                model="gpt-4o-mini",
+                                messages=[{
+                                    "role": "user",
+                                    "content": [
+                                        {"type": "text", "text": "请提取这张业务照片中的品牌、型号、关键参数，并给出销售建议。"},
+                                        {"type": "image_url", "image_url": {"url": f"data:image/{file_extension};base64,{base64_image}"}}
+                                    ]
+                                }]
+                            )
+                            parsed_intel = response.choices[0].message.content
+
+                        # --- 解析成功，放入缓冲区而不是直接入库 ---
+                        if parsed_intel:
+                            st.session_state.staged_intel = f"【🚨 深度文档/视觉情报提取】\n{parsed_intel}"
+                            st.session_state["last_parsed_file"] = file_hash
+                            st.rerun()  # 刷新以显示编辑区
+
+                    except Exception as e:
+                        st.error(f"文件解析失败：{e}")
+
+            # --- 渲染情报缓冲区 (Preview & Edit) ---
+            if st.session_state.staged_intel:
+                st.success("✅ 文件解析成功！请审查提炼出的情报（可手动修改）。")
+
+                # 用户可以在入库前手动修改 AI 的提炼结果
+                edited_intel = st.text_area("📝 情报缓冲区 (二次编辑)：", value=st.session_state.staged_intel, height=250)
+
+                # 正式入库按钮
+                if st.button("🧠 确认无误，提炼入库", type="primary"):
+                    current_data = st.session_state.get('project_data', "")
+                    st.session_state['project_data'] = (current_data + "\n\n" + edited_intel) if current_data else edited_intel
+
+                    # 记录该文件指纹，彻底拉黑后续的重复上传
+                    st.session_state.processed_file_hashes.add(file_hash)
+
+                    # 清空草稿箱
+                    st.session_state.staged_intel = ""
+                    st.session_state["last_parsed_file"] = None
+
+                    st.success("🎯 核心情报已正式注入作战沙盘！")
+                    st.rerun()
+
+    # 4. 提炼按钮与处理逻辑
+    st.markdown("---")
+    if st.button("🧠 智能提炼入库", type="primary"):
+        if not selected_project:
+            st.error("请先选择一个项目！")
+        elif not raw_text and not uploaded_file:
+            st.warning("请至少输入文字或上传文件！")
+        elif not api_key:
+            st.warning("⚠️ 请先在左侧侧边栏输入 API Key！")
+        else:
+            safe_text = mask_sensitive_info(raw_text) if raw_text else ""
+            if safe_text:
+                st.info(f"🛡️ 文本已脱敏：{safe_text[:80]}...")
+
+            try:
+                # 判断是否有图片上传 → 走多模态视觉解析
+                has_image = (uploaded_file is not None
+                             and uploaded_file.type.split('/')[0] == 'image')
+
+                with st.spinner("AI 正在深度解析情报中..."):
+                    if has_image:
+                        st.info("🔍 检测到图片情报，已启用 GPT-4o-mini 多模态视觉解析...")
+                        image_b64 = encode_image(uploaded_file)
+                        parsed_result = parse_visit_log_with_image(
+                            api_key, safe_text, image_b64
+                        )
+                    else:
+                        parsed_result = parse_visit_log(api_key, safe_text)
+
+                if parsed_result:
+                    save_intelligence(selected_project_id, raw_text, parsed_result)
+                    st.success("✅ 情报已成功结构化入库！")
+                    st.json(parsed_result)
+            except openai.AuthenticationError:
+                st.error("⚠️ API 秘钥无效或未配置，请在左侧侧边栏输入正确的秘钥！")
+            except Exception as e:
+                st.error(f"❌ 解析失败：{e}")
+
+# ── 作战沙盘 ──
+# ── 作战沙盘 ──
+with tab_sandbox:
+    render_sandbox_tab()
+
+# ── AI 伴学中心 ──
+with tab_academy:
+    render_learning_tab(api_key)
+
+with tab_knowledge:
+    st.markdown("## 📚 中央武器库：技术弹药充填舱")
+    st.caption("🔒 权限隔离：仅限后方核心技术团队与高管进行多模态资产注入。")
+
+    # ================================================================
+    # 初始化 RAG 引擎（全局单例，挂载到 session_state）
+    # ================================================================
+    if "rag_engine" not in st.session_state:
+        from utils.rag_engine import get_rag_engine
+        st.session_state.rag_engine = get_rag_engine()
+    
+    rag_engine = st.session_state.rag_engine
+
+    # 识别权限
+    is_tech_admin = st.session_state.get("role") in ["销售VP", "区域总监", "系统管理员"]
+
+    if is_tech_admin:
+        with st.expander("🔥 开启弹药装填 (支持多模态解析)", expanded=True):
+            st.markdown("#### 📥 第一输入口：本地多模态资产")
+            col_type, col_upload = st.columns([1, 2])
+            with col_type:
+                asset_type = st.selectbox(
+                    "🎯 弹药归属分类:", 
+                    ["📖 产品参数/白皮书", "🏆 历史成功竞标书", "🎬 现场施工/演示视频", "🎙️ 专家答疑录音"]
+                )
+            with col_upload:
+                uploaded_assets = st.file_uploader(
+                    "📎 支持格式: PDF, TXT, Word, PPT, MP4, MP3", 
+                    accept_multiple_files=True, 
+                    type=['pdf', 'txt', 'md', 'docx', 'ppt', 'pptx', 'mp4', 'mp3'],
+                    key="arsenal_uploader"
+                )
+
+            st.markdown("#### 🔗 第二输入口：外部智能知识源")
+            notebooklm_url = st.text_input(
+                "🌐 引用 NotebookLM / 企业 Wiki 共享链接:", 
+                placeholder="例如: https://notebooklm.google.com/...",
+                key="arsenal_url"
+            )
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("🚀 一键向量化并装填入库 (RAG 预处理)", type="primary", use_container_width=True):
+                if uploaded_assets or notebooklm_url:
+                    # 处理上传的文件
+                    if uploaded_assets:
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
+                        
+                        success_count = 0
+                        fail_count = 0
+                        total_chunks = 0
+                        
+                        for idx, uploaded_file in enumerate(uploaded_assets):
+                            try:
+                                status_text.text(f"🧠 正在解析: {uploaded_file.name} ({idx+1}/{len(uploaded_assets)})")
+                                
+                                # 读取文件字节流
+                                file_bytes = uploaded_file.read()
+                                
+                                # 调用 RAG 引擎解析
+                                result = rag_engine.process_document(
+                                    file_name=uploaded_file.name,
+                                    file_bytes=file_bytes,
+                                    asset_type=asset_type
+                                )
+                                
+                                if result["success"]:
+                                    success_count += 1
+                                    total_chunks += result["chunks"]
+                                    st.success(result["message"])
+                                else:
+                                    fail_count += 1
+                                    st.warning(result["message"])
+                                
+                                # 更新进度条
+                                progress_bar.progress((idx + 1) / len(uploaded_assets))
+                                
+                            except Exception as e:
+                                fail_count += 1
+                                st.error(f"❌ {uploaded_file.name} 处理异常: {str(e)}")
+                        
+                        status_text.empty()
+                        progress_bar.empty()
+                        
+                        # 最终汇报
+                        st.markdown("---")
+                        col_s1, col_s2, col_s3 = st.columns(3)
+                        col_s1.metric("✅ 成功", success_count)
+                        col_s2.metric("⚠️ 失败", fail_count)
+                        col_s3.metric("📦 知识碎片", total_chunks)
+                        
+                        if success_count > 0:
+                            st.success(f"🎯 弹药装填完毕！共生成 {total_chunks} 个知识碎片，前线【第一现场】的 AI 大脑已同步挂载。")
+                    
+                    # 处理外部链接
+                    if notebooklm_url:
+                        st.info("🔗 外部链接功能开发中，敬请期待...")
+                    
+                else:
+                    st.error("⚠️ 指挥官，弹药舱为空，请先上传文件或输入有效链接！")
+    else:
+        st.info("🛡️ 权限拦截：您当前的身份为【前线销售】，无法直接修改中央武器库。请前往【第一现场】调用已有弹药。")
+
+    st.divider()
+    
+    # ================================================================
+    # 动态渲染已入库的知识资产列表
+    # ================================================================
+    st.markdown("### 🗄️ 当前可用弹药矩阵 (已挂载至第一现场)")
+    
+    # 获取统计信息
+    stats = rag_engine.get_stats()
+    all_docs = rag_engine.get_all_documents()
+    
+    if stats["total_documents"] == 0:
+        st.info("📭 武器库为空，请上传技术资产以激活智能检索能力。")
+    else:
+        # 统计面板
+        col_stat1, col_stat2, col_stat3, col_stat4 = st.columns(4)
+        col_stat1.metric("📚 文档总数", stats["total_documents"])
+        col_stat2.metric("📦 知识碎片", stats["total_chunks"])
+        col_stat3.metric("💾 总容量", f"{stats['total_size'] // 1024} KB")
+        
+        # 按类型统计
+        type_summary = stats.get("by_type", {})
+        col_stat4.metric("🎯 分类", len(type_summary))
+        
+        st.markdown("#### 📋 已入库资产清单")
+        
+        # 以表格形式展示
+        if all_docs:
+            import pandas as pd
+            
+            df = pd.DataFrame(all_docs)
+            df = df[["filename", "asset_type", "chunks", "status", "timestamp"]]
+            df.columns = ["文件名", "资产类型", "碎片数", "状态", "入库时间"]
+            
+            st.dataframe(
+                df,
+                use_container_width=True,
+                hide_index=True
+            )
+        
+        # 按类型分组展示
+        st.markdown("#### 🎯 分类视图")
+        type_cols = st.columns(min(len(type_summary), 4))
+        
+        for idx, (asset_type, count) in enumerate(type_summary.items()):
+            with type_cols[idx % len(type_cols)]:
+                st.info(f"**{asset_type}**\n\n{count} 个碎片")
+        
+        # 管理操作
+        if is_tech_admin:
+            st.markdown("---")
+            with st.expander("🔧 武器库管理"):
+                col_mgmt1, col_mgmt2 = st.columns(2)
+                
+                with col_mgmt1:
+                    if st.button("🔍 测试搜索功能", use_container_width=True):
+                        test_query = st.text_input("输入关键词测试:", key="test_search")
+                        if test_query:
+                            results = rag_engine.simple_search(test_query, top_k=3)
+                            st.write(f"找到 {len(results)} 个匹配结果：")
+                            for r in results:
+                                with st.expander(f"📄 {r['filename']} (匹配度: {r['score']})"):
+                                    st.text(r['content'][:300] + "...")
+                
+                with col_mgmt2:
+                    if st.button("⚠️ 清空武器库", type="secondary", use_container_width=True):
+                        if st.checkbox("确认清空所有数据", key="confirm_clear"):
+                            rag_engine.clear_all()
+                            st.success("✅ 武器库已清空")
+                            st.rerun()
+
+with tab_live_pitch:
+    st.markdown("## 🎙️ 第一现场：沉浸式客户展厅与双向连线")
+    st.caption("🎯 在此模式下，系统分为【客户明面交互】与【销售战术暗线】。")
+
+    # 模拟当前带入现场的项目上下文
+    live_project_list = list(st.session_state.get("projects", {}).keys()) or ["暂无项目"]
+    current_live_project = st.selectbox(
+        "🔗 绑定本次拜访作战项目 (继承沙盘数据):",
+        live_project_list,
+        key="live_pitch_project"
+    )
+    st.divider()
+
+    # 构建双面屏布局：左侧 70% 客户看，右侧 30% 销售看
+    col_client, col_sales = st.columns([7, 3])
+
+    with col_client:
+        st.markdown("### 🖥️ 客户交互大屏 (Client View)")
+        st.info("🖼️ 这里将轮播我们在【核心技术武器库】中准备的 3D 模型、成功案例与技术参数表。")
+
+        # 客户直连大模型通道
+        client_query = st.chat_input("🎙️ 客户或业务员在此输入技术疑问 (支持语音/文字)...")
+
+        if client_query:
+            st.session_state.last_client_query = client_query
+            st.toast("捕捉到现场交流信号！", icon="📡")
+
+            with st.chat_message("user"):
+                st.write(f"**客户提问：** {client_query}")
+
+            with st.chat_message("assistant"):
+                with st.spinner("AI 专家正在调取核心技术库..."):
+                    import time
+                    time.sleep(1.5)  # 模拟大模型思考和 RAG 检索
+                    st.write("您好！关于您提到的这个问题，我们的产品采用了最新的防腐涂层技术，其核心优势在于...")
+                    st.caption("✅ 答案已生成。这部分内容是绝对专业、可直接展示给客户看的官方回复。")
+
+    with col_sales:
+        st.markdown("### 🥽 战术护目镜 (Sales Only)")
+        st.caption("🤫 仅销售可见的实时底牌与战术指导")
+
+        if st.session_state.get("last_client_query"):
+            st.warning(
+                "**🎯 AI 战术提示：**\n\n"
+                "客户重点关注了该技术指标。"
+                "请立刻引导展示【镇海炼化】的无故障运行案例！\n\n"
+                "**💰 报价底线：**\n"
+                "当前方案利润空间充足，若客户犹豫，"
+                "可承诺赠送一年延保。"
+            )
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("🆘 呼叫后方技术群", use_container_width=True):
+                st.success("✅ 已将现场痛点、客户原话打包发送至企业微信技术群！后方专家正在连线...")
+        else:
+            st.markdown("*(等待捕捉现场客户提问...)*")
+
+# ── 领导看板 ──
+# ── 领导看板 ──
+with tab_leader:
+    render_leader_tab(api_key)
