@@ -63,21 +63,45 @@ def init_db():
     """)
 
     conn.commit()
+
+    # ── Entity-First 架构升级：为 projects 表追加实体字段 ──
+    cursor.execute("PRAGMA table_info(projects)")
+    existing_cols = {row[1] for row in cursor.fetchall()}
+    entity_columns = {
+        "client": "TEXT DEFAULT ''",
+        "design_institute": "TEXT DEFAULT ''",
+        "general_contractor": "TEXT DEFAULT ''",
+        "applicant": "TEXT DEFAULT ''",
+        "dept": "TEXT DEFAULT ''",
+    }
+    for col_name, col_type in entity_columns.items():
+        if col_name not in existing_cols:
+            cursor.execute(f"ALTER TABLE projects ADD COLUMN {col_name} {col_type}")
+    conn.commit()
+
     conn.close()
 
 
 # ── 项目管理 ──
 
-def add_project(project_name: str, current_stage: str):
-    """新建作战项目。"""
+def add_project(project_name: str, current_stage: str,
+                client: str = "", design_institute: str = "",
+                general_contractor: str = "", applicant: str = "",
+                dept: str = ""):
+    """新建作战项目 (Entity-First：含完整实体元数据)。"""
     conn = sqlite3.connect("sri_intel.db")
     cursor = conn.cursor()
     cursor.execute(
-        "INSERT INTO projects (project_name, current_stage) VALUES (?, ?)",
-        (project_name, current_stage),
+        "INSERT INTO projects (project_name, current_stage, client, "
+        "design_institute, general_contractor, applicant, dept) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (project_name, current_stage, client, design_institute,
+         general_contractor, applicant, dept),
     )
+    new_id = cursor.lastrowid
     conn.commit()
     conn.close()
+    return new_id
 
 
 def get_projects():
@@ -180,10 +204,19 @@ def save_intelligence(project_id: int, raw_text: str, parsed_json_str: str):
 
 
 def get_all_projects():
-    """获取所有不重复的项目名称列表（来自 projects 表）。"""
+    """获取所有项目 (Entity-First 富数据)。
+    返回 [(project_id, project_name, client, design_institute,
+           general_contractor, applicant, dept), ...]
+    """
     conn = sqlite3.connect("sri_intel.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT DISTINCT project_id, project_name FROM projects ORDER BY project_id")
+    cursor.execute(
+        "SELECT DISTINCT project_id, project_name, "
+        "COALESCE(client, ''), COALESCE(design_institute, ''), "
+        "COALESCE(general_contractor, ''), COALESCE(applicant, ''), "
+        "COALESCE(dept, '') "
+        "FROM projects ORDER BY project_id"
+    )
     rows = cursor.fetchall()
     conn.close()
     return rows
