@@ -79,6 +79,59 @@ def init_db():
             cursor.execute(f"ALTER TABLE projects ADD COLUMN {col_name} {col_type}")
     conn.commit()
 
+    # ── 知识库表 ──
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS knowledge_base (
+            doc_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            title       TEXT NOT NULL,
+            category    TEXT NOT NULL,
+            icon        TEXT DEFAULT '📄',
+            file_type   TEXT DEFAULT 'PDF',
+            file_size   TEXT DEFAULT '',
+            description TEXT DEFAULT '',
+            file_path   TEXT DEFAULT '',
+            created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+
+    # ── 种子数据（幂等：仅空表时插入）──
+    cursor.execute("SELECT COUNT(*) FROM knowledge_base")
+    if cursor.fetchone()[0] == 0:
+        seed_docs = [
+            ("暖通空调产品选型手册 v3.2", "产品参数", "📄", "PDF", "12.4 MB",
+             "全系列产品技术参数、选型公式与安装规范"),
+            ("中央空调能效对标表", "产品参数", "📊", "XLSX", "3.8 MB",
+             "COP/EER 能效等级全品牌横向对比"),
+            ("变频多联机技术白皮书", "产品参数", "📑", "PDF", "7.6 MB",
+             "新一代变频技术原理与节能数据"),
+            ("格力 vs 美的 竞品打单卡", "竞品打单卡", "⚔️", "PDF", "5.2 MB",
+             "核心技术差异、报价策略、客户痛点话术"),
+            ("大金 VRV 系列攻防手册", "竞品打单卡", "🛡️", "PDF", "4.1 MB",
+             "大金产品弱点分析及我方优势话术"),
+            ("海尔磁悬浮竞品对抗指南", "竞品打单卡", "🎯", "DOCX", "2.9 MB",
+             "磁悬浮机组技术对比与商务策略"),
+            ("2025年度中标项目汇编", "历史中标库", "🏆", "PDF", "28.6 MB",
+             "全年 47 个中标项目复盘，含报价与中标策略"),
+            ("医院系统中标案例集", "历史中标库", "🏥", "PDF", "15.3 MB",
+             "三甲医院暖通项目中标方案与经验总结"),
+            ("数据中心制冷中标案例", "历史中标库", "🖥️", "PDF", "18.7 MB",
+             "大型数据中心精密空调中标复盘"),
+            ("企业三证合一资质包", "资质文件", "📋", "ZIP", "45.2 MB",
+             "营业执照、安全许可证、ISO 认证全套"),
+            ("ISO9001/14001 认证证书", "资质文件", "🏅", "PDF", "8.4 MB",
+             "质量管理与环境管理体系认证"),
+            ("特种设备安装改造许可证", "资质文件", "🔧", "PDF", "2.1 MB",
+             "A2 级压力容器安装许可"),
+        ]
+        cursor.executemany(
+            "INSERT INTO knowledge_base (title, category, icon, file_type, file_size, description) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            seed_docs,
+        )
+        conn.commit()
+
     conn.close()
 
 

@@ -1,7 +1,260 @@
 import base64
+import sys
+from dataclasses import dataclass
 
 import openai
 from openai import OpenAI
+
+
+# ══════════════════════════════════════════════════
+# 🌐 GlobalLLMRouter — 高可用大模型路由（5 级回退防线）
+# ══════════════════════════════════════════════════
+
+# ANSI 颜色常量
+_YELLOW = "\033[93m"
+_RED = "\033[91m"
+_GREEN = "\033[92m"
+_CYAN = "\033[96m"
+_RESET = "\033[0m"
+_BOLD = "\033[1m"
+
+
+@dataclass
+class LLMProvider:
+    """单个 LLM 提供商配置"""
+    name: str       # "OpenAI" / "Google" / "Anthropic" / "xAI" / "Local"
+    model: str      # 模型标识符
+    base_url: str   # API base URL（支持反向代理）
+    api_key: str    # 动态传入
+    timeout: int    # 超时秒数
+
+
+class GlobalLLMRouter:
+    """
+    高可用大模型路由 — 5 级回退防线。
+    按优先级逐个尝试 provider，任意成功即返回，全部失败抛出异常。
+    """
+
+    def __init__(self, providers: list[LLMProvider]):
+        self.providers = providers
+
+    def chat(self, messages: list[dict], temperature: float = 0.6, **kwargs) -> str:
+        """统一调用入口，自动回退。"""
+        errors: list[str] = []
+        total = len([p for p in self.providers if p.api_key])
+
+        for idx, provider in enumerate(self.providers, 1):
+            if not provider.api_key:
+                continue  # 跳过未配置 Key 的 provider
+
+            try:
+                print(
+                    f"{_CYAN}{_BOLD}🔗 [{idx}/{total}] "
+                    f"尝试 {provider.name} ({provider.model})...{_RESET}",
+                    file=sys.stderr,
+                )
+
+                if provider.name == "Anthropic":
+                    # 使用原生 Anthropic SDK
+                    import anthropic
+                    client = anthropic.Anthropic(
+                        api_key=provider.api_key,
+                        timeout=provider.timeout,
+                    )
+                    # 提取 system 消息和 user/assistant 消息
+                    system_text = ""
+                    user_msgs = []
+                    for m in messages:
+                        if m["role"] == "system":
+                            system_text += m["content"] + "\n"
+                        else:
+                            user_msgs.append({"role": m["role"], "content": m["content"]})
+                    if not user_msgs:
+                        user_msgs = [{"role": "user", "content": system_text}]
+                        system_text = ""
+                    create_kwargs = {
+                        "model": provider.model,
+                        "max_tokens": 4096,
+                        "messages": user_msgs,
+                        "temperature": temperature,
+                    }
+                    if system_text.strip():
+                        create_kwargs["system"] = system_text.strip()
+                    response = client.messages.create(**create_kwargs)
+                    content = response.content[0].text
+                else:
+                    # OpenAI 兼容 SDK（OpenAI / Gemini / xAI / Local）
+                    client = OpenAI(
+                        api_key=provider.api_key,
+                        base_url=provider.base_url,
+                        timeout=provider.timeout,
+                    )
+                    response = client.chat.completions.create(
+                        model=provider.model,
+                        messages=messages,
+                        temperature=temperature,
+                    )
+                    content = response.choices[0].message.content
+
+                print(
+                    f"{_GREEN}{_BOLD}✅ {provider.name} 命中成功！{_RESET}",
+                    file=sys.stderr,
+                )
+                return content
+
+            except openai.AuthenticationError as e:
+                msg = f"[{provider.name}] 🔑 AuthError (Key 无效): {e}"
+                errors.append(msg)
+                print(
+                    f"{_RED}{_BOLD}⛔ {provider.name} Key 无效 (401)，"
+                    f"正在切换至下一防线...{_RESET}",
+                    file=sys.stderr,
+                )
+                continue
+
+            except openai.APITimeoutError as e:
+                msg = f"[{provider.name}] ⏱️ Timeout: {e}"
+                errors.append(msg)
+                print(
+                    f"{_YELLOW}{_BOLD}⚠️ {provider.name} 调用超时 ({provider.timeout}s)，"
+                    f"正在无缝切换至下一防线...{_RESET}",
+                    file=sys.stderr,
+                )
+                continue
+
+            except openai.RateLimitError as e:
+                msg = f"[{provider.name}] 🚦 RateLimit: {e}"
+                errors.append(msg)
+                print(
+                    f"{_YELLOW}{_BOLD}⚠️ {provider.name} 触发限流，"
+                    f"正在无缝切换至下一防线...{_RESET}",
+                    file=sys.stderr,
+                )
+                continue
+
+            except (openai.APIConnectionError, openai.InternalServerError) as e:
+                msg = f"[{provider.name}] 💥 {type(e).__name__}: {e}"
+                errors.append(msg)
+                print(
+                    f"{_RED}{_BOLD}⚠️ {provider.name} 服务异常 ({type(e).__name__})，"
+                    f"正在无缝切换至下一防线...{_RESET}",
+                    file=sys.stderr,
+                )
+                continue
+
+            except openai.BadRequestError as e:
+                msg = f"[{provider.name}] ⚠️ BadRequest (400): {e}"
+                errors.append(msg)
+                print(
+                    f"{_RED}{_BOLD}⚠️ {provider.name} 请求被拒 (400: {e})，"
+                    f"正在切换至下一防线...{_RESET}",
+                    file=sys.stderr,
+                )
+                continue
+
+            except Exception as e:
+                msg = f"[{provider.name}] ❓ {type(e).__name__}: {e}"
+                errors.append(msg)
+                print(
+                    f"{_RED}{_BOLD}⚠️ {provider.name} 未知异常 ({type(e).__name__}: {e})，"
+                    f"正在切换至下一防线...{_RESET}",
+                    file=sys.stderr,
+                )
+                continue
+
+        # 全部失败
+        error_detail = "\n".join(errors)
+        print(
+            f"{_RED}{_BOLD}🚨 所有 LLM 防线均已失败！\n{error_detail}{_RESET}",
+            file=sys.stderr,
+        )
+        raise RuntimeError(f"所有 LLM 防线均已失败:\n{error_detail}")
+
+
+def build_llm_router(
+    primary_api_key: str = "",
+    llm_configs: dict | None = None,
+) -> GlobalLLMRouter:
+    """
+    按优先级构建 5 级路由。
+    如果前端传入了 llm_configs，使用动态配置；否则降级为单 Key 模式。
+    严格检查 enabled 字段，禁用的 provider 不进入路由。
+    """
+    cfg = llm_configs or {}
+
+    # 辅助函数：读取原始配置并填充默认值
+    def _get(provider_key: str, field: str, default: str) -> str:
+        return cfg.get(provider_key, {}).get(field, "") or default
+
+    def _enabled(provider_key: str, default: bool) -> bool:
+        p = cfg.get(provider_key, {})
+        if isinstance(p, dict) and "enabled" in p:
+            return bool(p["enabled"])
+        return default
+
+    providers: list[LLMProvider] = []
+
+    # 第一防线: OpenAI
+    if _enabled("openai", True):
+        key = _get("openai", "apiKey", primary_api_key)
+        if key:
+            providers.append(LLMProvider(
+                name="OpenAI",
+                model=_get("openai", "model", "gpt-4o-mini"),
+                base_url=_get("openai", "baseUrl", "https://api.openai.com/v1"),
+                api_key=key,
+                timeout=30,
+            ))
+
+    # 第二防线: Google Gemini
+    if _enabled("gemini", False):
+        key = _get("gemini", "apiKey", "")
+        if key:
+            providers.append(LLMProvider(
+                name="Google Gemini",
+                model=_get("gemini", "model", "gemini-2.0-flash"),
+                base_url=_get("gemini", "baseUrl", "https://generativelanguage.googleapis.com/v1beta/openai/"),
+                api_key=key,
+                timeout=30,
+            ))
+
+    # 第三防线: Anthropic
+    if _enabled("anthropic", False):
+        key = _get("anthropic", "apiKey", "")
+        if key:
+            providers.append(LLMProvider(
+                name="Anthropic",
+                model=_get("anthropic", "model", "claude-3-5-sonnet-20241022"),
+                base_url=_get("anthropic", "baseUrl", "https://api.anthropic.com/v1/"),
+                api_key=key,
+                timeout=45,
+            ))
+
+    # 第四防线: xAI Grok
+    if _enabled("xai", False):
+        key = _get("xai", "apiKey", "")
+        if key:
+            providers.append(LLMProvider(
+                name="xAI Grok",
+                model=_get("xai", "model", "grok-3-mini"),
+                base_url=_get("xai", "baseUrl", "https://api.x.ai/v1"),
+                api_key=key,
+                timeout=30,
+            ))
+
+    # 终极物理防线: Local DeepSeek（默认启用，可通过配置禁用）
+    if _enabled("local", True):
+        local_url = _get("local", "baseUrl", "http://localhost:11434/v1")
+        providers.append(LLMProvider(
+            name="Local DeepSeek",
+            model=_get("local", "model", "deepseek-r1"),
+            base_url=local_url,
+            api_key="local",
+            timeout=120,
+        ))
+
+    return GlobalLLMRouter(providers)
+
 
 SYSTEM_PROMPT = (
     "你是一名资深工业电气销售专家。请对销售拜访口述记录进行结构化情报提取，"
@@ -38,10 +291,11 @@ def encode_image(uploaded_file) -> str:
 
 def parse_visit_log(api_key: str, raw_text: str) -> str:
     """调用大模型，将拜访流水账提炼为结构化 JSON（4+1 情报模型）。"""
-    client = OpenAI(api_key=api_key)
+    # 根据 key 前缀自动构建路由
+    llm_configs = _detect_llm_config(api_key)
+    router = build_llm_router(primary_api_key=api_key, llm_configs=llm_configs)
 
-    response = client.chat.completions.create(
-        model="gpt-3.5-turbo",
+    return router.chat(
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": raw_text},
@@ -49,7 +303,17 @@ def parse_visit_log(api_key: str, raw_text: str) -> str:
         temperature=0.2,
     )
 
-    return response.choices[0].message.content
+
+def _detect_llm_config(api_key: str) -> dict:
+    """根据 API Key 前缀自动检测 LLM 提供商并构建配置。"""
+    if api_key.startswith("sk-ant-"):
+        return {
+            "openai": {"enabled": False},
+            "anthropic": {"enabled": True, "apiKey": api_key, "model": "claude-3-5-sonnet-20241022"},
+            "local": {"enabled": False},  # 禁用本地回退，避免卡住
+        }
+    # 默认走 OpenAI
+    return {}
 
 
 def parse_visit_log_with_image(api_key: str, raw_text: str, image_base64: str) -> str:
@@ -460,6 +724,153 @@ def generate_insider_ammo(api_key: str, context_data: str,
     )
 
     return response.choices[0].message.content
+
+
+# ── 沙盘话术生成（深度打磨版） ──
+
+# 最高指令：焊死在每次请求最前面的 System Persona
+_SALES_PERSONA = (
+    "【最高指令 — 你的身份】\n"
+    "你是一个拥有 15 年 B2B 大客户销售经验的顶级销冠。\n"
+    "深谙人性、懂权谋、懂利益交换，说话一针见血。\n"
+    "你的一切输出必须基于真实商战逻辑——不说废话、不用套话模板、\n"
+    "不搞'尊敬的X总您好'式官腔。\n"
+    "你的目标是用最自然、最高情商的语言推进项目，扫除废标风险。\n\n"
+)
+
+_PITCH_PROMPTS = {
+    "wechat_msg": (
+        "【任务：微信跟进消息】\n"
+        "你现在要给客户关键人发一条微信。严格遵守：\n"
+        "1. 总字数 ≤ 150 字！像真人聊天，别长篇大论。\n"
+        "2. 开头用一句生活化寒暄破冰（天气/行业新闻/对方近况），但不超过 20 字。\n"
+        "3. 核心：针对下方【废标风险/情报盲区】中最致命的一条，\n"
+        "   巧妙地抛出一个'诱饵'——比如：'我这边刚拿到一份对标数据，\n"
+        "   跟你们现在选型方向高度相关，找个时间给您当面拆解一下？'\n"
+        "4. 如果下方有【竞品情报】，必须侧面敲打一下客户——\n"
+        "   用暗示而非直接攻击（例如：'最近听说有些友商交期承诺很激进，\n"
+        "   到时候落地可能有gap...'）。\n"
+        "5. 结尾必须留一个轻松的互动钩子，引导对方回复。\n"
+        "6. 适当使用 emoji，像真人微信，不要感叹号满天飞。\n"
+        "7. 绝对禁止：'尊敬的'、'贵司'、'不胜荣幸'等翻译腔。\n"
+    ),
+    "email": (
+        "【任务：正式商务跟进邮件】\n"
+        "你现在要写一封可以直接发送的商务邮件。严格遵守：\n"
+        "1. 必须包含：邮件主题行 + 正文 + 落款。\n"
+        "2. 语气：不卑不亢，专业但不冰冷，像一个自信的行业专家。\n"
+        "3. 核心策略——把下方【控标点】包装成'对客户项目极其负责的技术建议'：\n"
+        "   例如控标点是'预算未确认'，你要写成'为确保贵方项目顺利推进，\n"
+        "   我们建议在招标前完成预算框架的初步对齐，以下是我方的参考方案...'。\n"
+        "4. 竞品挖坑：从【竞品情报】中找到对手的弱点，\n"
+        "   不直接点名攻击，而是在邮件中自然地提出一个'评估维度'，\n"
+        "   让客户在对比时自己发现竞品的短板。\n"
+        "5. 结尾必须给出一个明确的 Call-to-Action（约会议/送样/技术交流）。\n"
+        "6. 绝对禁止：空洞的自卖自夸、无信息量的套话。\n"
+    ),
+    "internal_strategy": (
+        "【任务：内部攻防作战方案】\n"
+        "你现在要为销售团队输出一份冷酷、精准的内部作战方案。\n"
+        "这不是给客户看的，是给自己人看的。用词要狠、准、冷酷。\n"
+        "必须包含以下四个板块（Markdown 格式）：\n\n"
+        "## 🎯 项目死穴诊断\n"
+        "直接列出当前项目最致命的 2-3 个风险点，\n"
+        "基于下方的【废标风险】和【控标点】，一针见血点出哪里可能翻车。\n\n"
+        "## ⚔️ 竞品攻击路线\n"
+        "基于【竞品情报】分析：对手的弱点在哪？\n"
+        "哪个决策人可能已被竞品搞定？我们怎么反攻？\n"
+        "给出具体的拉踩话术和差异化打法。\n\n"
+        "## 🛡️ 风险规避 & 控标建议\n"
+        "针对每一条废标风险，给出具体的规避措施：\n"
+        "要补哪些材料？要约见谁？要怎么设置评标门槛让我方占优？\n\n"
+        "## ⏰ 48 小时关键推进动作\n"
+        "列出 3-5 件必须在 48 小时内完成的具体动作，\n"
+        "包括：约见哪个关键人、送什么资料、安排什么局。\n"
+        "如果需要请客吃饭或利益绑定，直说！这是内部文档。\n"
+    ),
+    "tech_solution": (
+        "【任务：技术方案摘要】\n"
+        "输出一份可直接发给客户技术团队的技术方案摘要。严格遵守：\n"
+        "1. 强制使用 FAB 结构：Feature(特征) → Advantage(优势) → Benefit(利益)。\n"
+        "2. 针对下方【控标点】设置对我方有利的评标维度和技术门槛。\n"
+        "3. 用'行业常见风险'包装竞品弱点，不直接点名攻击。\n"
+        "4. 缺失的具体参数，严格使用 [需填入具体参数] 占位。\n"
+        "5. 用 Markdown 格式输出 3-4 个核心段落，极其严谨专业。\n"
+        "6. 像一份可直接微信转发给技术负责人的正式汇报文档。\n"
+    ),
+}
+
+_PITCH_TEMPERATURES = {
+    "wechat_msg": 0.7,
+    "email": 0.6,
+    "internal_strategy": 0.5,
+    "tech_solution": 0.4,
+}
+
+# ── 角色靶向精准打击策略 ──
+
+_ROLE_STRATEGIES = {
+    "决策者": (
+        "\n【🎯 角色靶向：决策者】\n"
+        "话术必须拔高！核心关注：\n"
+        "- ROI（投资回报率）、降本增效、业务安全与政绩面子\n"
+        "- 帮他规避最大的雷区，用数据和大局观征服他\n"
+        "语气：自信、有分量、像一个值得信赖的行业顾问。\n"
+    ),
+    "使用者": (
+        "\n【🛠️ 角色靶向：使用者】\n"
+        "话术要接地气！核心关注：\n"
+        "- 系统稳定性、操作便捷性、售后服务响应速度\n"
+        "- 让他确信用我们的方案'好干活、不背锅'\n"
+        "语气：务实、贴心、像一个靠谱的技术老友。\n"
+    ),
+    "影响者": (
+        "\n【⚖️ 角色靶向：影响者】\n"
+        "话术要体现专业压制！核心关注：\n"
+        "- 参数壁垒、合规性、技术先进性\n"
+        "- 用我们的'控标点'给他提供打击竞品的武器弹药\n"
+        "语气：严谨、专业、充满技术优越感。\n"
+    ),
+    "教练/内线": (
+        "\n【🕵️ 角色靶向：教练/内线】\n"
+        "话术要像自己人！核心关注：\n"
+        "- 内部政治格局、个人私交、利益绑定\n"
+        "- 提供能让他去向上级邀功的控标素材，或刺探竞品的致命情报\n"
+        "语气：极其亲密、口语化、像微信私聊兄弟/闺蜜。\n"
+    ),
+}
+
+
+def generate_sales_pitch(api_key: str, context_data: str,
+                         pitch_type: str = "wechat_msg",
+                         target_role: str = "",
+                         llm_configs: dict | None = None) -> str:
+    """
+    基于项目沙盘情报动态生成实战话术。
+    pitch_type: wechat_msg | email | internal_strategy | tech_solution
+    target_role: 决策者 | 使用者 | 影响者 | 教练/内线 | ""(不限定)
+    context_data: 序列化后的项目全量情报文本（含优先级链注入）。
+    llm_configs: 前端传入的动态 LLM 路由配置（可选）。
+    """
+    # 焊死 persona + 任务指令
+    system_prompt = _SALES_PERSONA + _PITCH_PROMPTS.get(
+        pitch_type, _PITCH_PROMPTS["wechat_msg"]
+    )
+
+    # 角色靶向注入（第二顺位）
+    if target_role and target_role in _ROLE_STRATEGIES:
+        system_prompt += _ROLE_STRATEGIES[target_role]
+
+    temperature = _PITCH_TEMPERATURES.get(pitch_type, 0.6)
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"【项目沙盘情报 — 全量注入】\n{context_data}"},
+    ]
+
+    # 使用 GlobalLLMRouter 高可用路由
+    router = build_llm_router(primary_api_key=api_key, llm_configs=llm_configs)
+    return router.chat(messages=messages, temperature=temperature)
 
 
 def transcribe_audio(api_key: str, audio_bytes: bytes) -> str:

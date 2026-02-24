@@ -3,3 +3,6 @@ pandas
 openai
 python-docx
 PyPDF2
+fastapi
+uvicorn[standard]
+python-multipart
